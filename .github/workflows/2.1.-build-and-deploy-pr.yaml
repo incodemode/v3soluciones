@@ -1,0 +1,114 @@
+name: 2.1.- Build and Deploy to PR
+run-name: 2.1.- Build and Deploy to PR (${{ inputs.platform }}) - ${{ github.sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Architecture
+        required: true
+        default: amd64
+        type: choice
+        options:
+          - amd64
+          - arm64
+
+concurrency:
+  group: v3soluciones-pr
+  cancel-in-progress: false
+
+jobs:
+  build-deploy:
+    name: Build and deploy (pr, ${{ inputs.platform }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read deployment configuration
+        run: |
+          {
+            echo 'CONFIG_JSON<<EOF'
+            cat .github/config.json
+            echo
+            echo 'EOF'
+          } >> "$GITHUB_ENV"
+
+      - name: Set deployment version
+        run: |
+          echo "VERSION=${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
+
+      - name: Validate required configuration
+        env:
+          DEPLOY_PK: ${{ secrets.DEPLOY_PK }}
+          DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USER }}
+          DOCKERHUB_PASS: ${{ secrets.DOCKERHUB_PASS }}
+          KNOWN_HOSTS: ${{ vars.KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          for name in DEPLOY_PK DOCKERHUB_USER DOCKERHUB_PASS KNOWN_HOSTS; do
+            test -n "${!name:-}" || { echo "Missing GitHub secret/variable: $name" >&2; exit 1; }
+          done
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_PASS }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/${{ inputs.platform }}
+          push: true
+          build-args: |
+            DEPLOYMENT_VERSION=${{ env.VERSION }}
+          tags: lmdbluis/incodemode:v3soluciones.${{ inputs.platform }}.${{ env.VERSION }}
+        env:
+          DOCKER_BUILD_SUMMARY: true
+
+      - name: Deploy to PR Kubernetes server
+        env:
+          DEPLOY_PK: ${{ secrets.DEPLOY_PK }}
+          KNOWN_HOSTS: ${{ vars.KNOWN_HOSTS }}
+          TARGET_SERVER: ${{ fromJson(env.CONFIG_JSON).envServers.pr }}
+          ARCH: ${{ inputs.platform }}
+        run: |
+          set -euo pipefail
+          install -m 600 /dev/null known_hosts
+          printf '%s\n' "$KNOWN_HOSTS" > known_hosts
+          eval "$(ssh-agent -s)"
+          trap 'ssh-agent -k >/dev/null' EXIT
+          ssh-add <(printf '%s\n' "$DEPLOY_PK")
+          ssh -o UserKnownHostsFile=known_hosts "root@${TARGET_SERVER}" "mkdir -p /tmp/v3soluciones/kubernetes /tmp/v3soluciones/scripts"
+          rsync -av --delete -e "ssh -o UserKnownHostsFile=./known_hosts" kubernetes/ "root@${TARGET_SERVER}:/tmp/v3soluciones/kubernetes/"
+          rsync -av --delete -e "ssh -o UserKnownHostsFile=./known_hosts" scripts/ "root@${TARGET_SERVER}:/tmp/v3soluciones/scripts/"
+          ssh -o UserKnownHostsFile=known_hosts "root@${TARGET_SERVER}" \
+            "cd /tmp/v3soluciones && bash scripts/deploy.sh --version '${VERSION}' --arch '${ARCH}'"
+          ssh -o UserKnownHostsFile=known_hosts "root@${TARGET_SERVER}" \
+            "kubectl -n default rollout status deployment/v3soluciones --timeout=3m"
+
+      - name: Verify deployed version and redirects
+        env:
+          TARGET_SERVER: ${{ fromJson(env.CONFIG_JSON).envServers.pr }}
+        run: |
+          set -euo pipefail
+          bash scripts/smoke-test.sh https://v3soluciones.com "$TARGET_SERVER" "$VERSION" links.txt
+
+      - name: Deployment summary
+        env:
+          ARCH: ${{ inputs.platform }}
+        run: |
+          {
+            echo '### V3 Soluciones deployed to PR'
+            printf "\nVersion: \`%s\`\n" "$VERSION"
+            printf "\nImage: \`lmdbluis/incodemode:v3soluciones.%s.%s\`\n" "$ARCH" "$VERSION"
+            printf "\nSanity URL: https://v3soluciones.com/version.txt\n"
+            printf "\nNamespace: \`default\`\n"
+          } >> "$GITHUB_STEP_SUMMARY"
