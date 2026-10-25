@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
+set -x
 
 base_url="${1:?base URL is required}"
 server_ip="${2:?server IP is required}"
@@ -8,7 +10,17 @@ links_file="${4:-links.txt}"
 host="${base_url#*://}"
 host="${host%%/*}"
 
-curl_args=(--silent --show-error --fail --resolve "${host}:443:${server_ip}")
+curl_args=(
+  --silent
+  --show-error
+  --fail-with-body
+  --retry 18
+  --retry-all-errors
+  --retry-delay 5
+  --connect-timeout 10
+  --max-time 20
+  --resolve "${host}:443:${server_ip}"
+)
 
 actual_version="$(curl "${curl_args[@]}" \
   -H 'Cache-Control: no-cache' \
@@ -23,7 +35,7 @@ curl "${curl_args[@]}" \
   -H 'Cache-Control: no-cache' \
   "${base_url}/" | grep -Fq "deployment-version: ${expected_version}"
 
-dermapedia_headers="$(curl --silent --show-error --resolve "${host}:443:${server_ip}" \
+dermapedia_headers="$(curl "${curl_args[@]}" \
   --output /dev/null --dump-header - "${base_url}/enlace/congreso-dermapedia" | tr -d '\r')"
 dermapedia_status="$(printf '%s\n' "$dermapedia_headers" | awk 'NR == 1 {print $2}')"
 dermapedia_type="$(printf '%s\n' "$dermapedia_headers" | awk 'BEGIN{IGNORECASE=1} /^Content-Type:/ {sub(/^[^:]+:[[:space:]]*/, ""); print; exit}')"
@@ -40,7 +52,7 @@ while IFS=' ' read -r path expected_location extra; do
   [[ -z "$path" || "$path" == \#* ]] && continue
   [[ -z "${extra:-}" ]] || { echo "Invalid links entry: $path $expected_location $extra" >&2; exit 1; }
 
-  headers="$(curl --silent --show-error --resolve "${host}:443:${server_ip}" \
+  headers="$(curl "${curl_args[@]}" \
     --output /dev/null --dump-header - "${base_url}${path}" | tr -d '\r')"
 
   status="$(printf '%s\n' "$headers" | awk 'NR == 1 {print $2}')"

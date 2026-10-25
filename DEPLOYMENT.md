@@ -34,6 +34,8 @@ The build writes this value to:
 
 After Kubernetes reports a successful rollout, `scripts/smoke-test.sh` connects directly to the PR server while using `v3soluciones.com` for TLS and ingress routing. It verifies the exact version, the HTML version comment, all redirect destinations, and their no-cache headers. Only then does the workflow report deployment success.
 
+The Deployment uses `/` for startup, readiness, and liveness probes. Its rolling-update strategy has `maxUnavailable: 0`, and a replacement pod must remain ready for 10 seconds before Kubernetes considers it available and removes an old pod. The workflow also waits for `kubectl rollout status deployment/v3soluciones` before running the external smoke test.
+
 ## GitHub configuration
 
 Required Actions secrets:
